@@ -1,0 +1,134 @@
+---
+# Shadow Deployment Strategy - Production Version
+# Handles all live user traffic
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-production
+  labels:
+    app: myapp
+    version: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+      version: production
+  template:
+    metadata:
+      labels:
+        app: myapp
+        version: production
+    spec:
+      containers:
+      - name: myapp
+        image: myapp:v1.0.0
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "250m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+# Shadow Deployment Strategy - Shadow Version
+# Receives mirrored traffic for testing but responses are not returned to users
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-shadow
+  labels:
+    app: myapp
+    version: shadow
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+      version: shadow
+  template:
+    metadata:
+      labels:
+        app: myapp
+        version: shadow
+    spec:
+      containers:
+      - name: myapp
+        image: myapp:v2.0.0-shadow  # New version under test
+        ports:
+        - containerPort: 8080
+        env:
+        - name: SHADOW_MODE
+          value: "true"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "250m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+# Production Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-production-service
+spec:
+  selector:
+    app: myapp
+    version: production
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+---
+# Shadow Service (internal only, not exposed to users)
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-shadow-service
+spec:
+  selector:
+    app: myapp
+    version: shadow
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+---
+# Note: Shadow deployment requires a Service Mesh like Istio to mirror traffic
+# Example Istio VirtualService for traffic mirroring:
+#
+# apiVersion: networking.istio.io/v1beta1
+# kind: VirtualService
+# metadata:
+#   name: myapp-mirror
+# spec:
+#   hosts:
+#   - myapp-production-service
+#   http:
+#   - route:
+#     - destination:
+#         host: myapp-production-service
+#       weight: 100
+#     mirror:
+#       host: myapp-shadow-service
+#     mirrorPercentage:
+#       value: 100.0  # Mirror 100% of traffic to shadow
+#
+# Monitor shadow deployment metrics and logs to validate behavior
+# Shadow responses are discarded and never returned to users

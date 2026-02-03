@@ -1,0 +1,140 @@
+---
+# Best-Effort Controlled Rollout using Argo Rollouts
+# Requires Argo Rollouts CRD to be installed:
+# kubectl create namespace argo-rollouts
+# kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: myapp-controlled
+  labels:
+    app: myapp
+spec:
+  replicas: 10
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: myapp
+        image: myapp:v1.0.0
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "250m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  strategy:
+    canary:
+      # Canary strategy with automated promotion based on metrics
+      steps:
+      - setWeight: 10     # Route 10% traffic to new version
+      - pause:
+          duration: 5m    # Wait 5 minutes
+      - setWeight: 20     # Increase to 20%
+      - pause:
+          duration: 5m
+      - setWeight: 40     # Increase to 40%
+      - pause:
+          duration: 10m
+      - setWeight: 60     # Increase to 60%
+      - pause:
+          duration: 10m
+      - setWeight: 80     # Increase to 80%
+      - pause:
+          duration: 10m
+      # Automatic full rollout if all steps pass
+      
+      # Analysis template for metrics-based decision making
+      analysis:
+        templates:
+        - templateName: success-rate-analysis
+        startingStep: 2   # Start analysis after 20% traffic
+        args:
+        - name: service-name
+          value: myapp-service
+      
+      # Automatic rollback on failure
+      maxSurge: "25%"
+      maxUnavailable: 0
+---
+# AnalysisTemplate for metrics-based validation
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate-analysis
+spec:
+  args:
+  - name: service-name
+  metrics:
+  - name: success-rate
+    interval: 1m
+    successCondition: result >= 0.95  # 95% success rate required
+    failureLimit: 3                   # Fail after 3 consecutive failures
+    provider:
+      prometheus:
+        address: http://prometheus.monitoring.svc.cluster.local:9090
+        query: |
+          sum(rate(
+            http_requests_total{service="{{args.service-name}}",status=~"2.."}[1m]
+          )) /
+          sum(rate(
+            http_requests_total{service="{{args.service-name}}"}[1m]
+          ))
+  - name: latency
+    interval: 1m
+    successCondition: result <= 500   # Latency under 500ms
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: http://prometheus.monitoring.svc.cluster.local:9090
+        query: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{service="{{args.service-name}}"}[1m])) by (le)
+          ) * 1000
+---
+# Service for Argo Rollout
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-service
+spec:
+  selector:
+    app: myapp
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+---
+# Commands:
+# Install Argo Rollouts kubectl plugin:
+#   curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
+#   chmod +x kubectl-argo-rollouts-linux-amd64
+#   sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+#
+# Monitor rollout: kubectl argo rollouts get rollout myapp-controlled
+# Watch rollout: kubectl argo rollouts get rollout myapp-controlled --watch
+# Promote manually: kubectl argo rollouts promote myapp-controlled
+# Abort rollout: kubectl argo rollouts abort myapp-controlled
+# Dashboard: kubectl argo rollouts dashboard

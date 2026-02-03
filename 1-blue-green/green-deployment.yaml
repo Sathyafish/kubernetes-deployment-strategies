@@ -1,0 +1,50 @@
+---
+# Blue/Green Deployment Strategy - Green Version (New)
+# This deployment runs the new version alongside the blue version
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-green
+  labels:
+    app: myapp
+    version: green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+      version: green
+  template:
+    metadata:
+      labels:
+        app: myapp
+        version: green
+    spec:
+      containers:
+      - name: myapp
+        image: myapp:v2.0.0  # New version
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "250m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+# Once green deployment is verified, update the service selector:
+# kubectl patch service myapp-service -p '{"spec":{"selector":{"version":"green"}}}'
+# To rollback: kubectl patch service myapp-service -p '{"spec":{"selector":{"version":"blue"}}}'

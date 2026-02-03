@@ -1,0 +1,158 @@
+---
+# Best-Effort Controlled Rollout using Flagger
+# Requires Flagger to be installed:
+# kubectl apply -k github.com/fluxcd/flagger//kustomize/linkerd
+
+# Base Deployment (managed by Flagger)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  labels:
+    app: myapp
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: myapp
+        image: myapp:v1.0.0
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "250m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+# Flagger Canary Configuration
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata:
+  name: myapp
+spec:
+  # Deployment reference
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+  
+  # Service configuration
+  service:
+    port: 80
+    targetPort: 8080
+  
+  # Progressive traffic shift
+  analysis:
+    # Schedule interval for canary analysis
+    interval: 1m
+    
+    # Max number of failed checks before rollback
+    threshold: 5
+    
+    # Max traffic percentage routed to canary
+    maxWeight: 50
+    
+    # Incremental traffic percentage increase
+    stepWeight: 10
+    
+    # Metrics for automated rollout decisions
+    metrics:
+    - name: request-success-rate
+      thresholdRange:
+        min: 99
+      interval: 1m
+    - name: request-duration
+      thresholdRange:
+        max: 500  # milliseconds
+      interval: 1m
+    
+    # Webhooks for custom validation
+    webhooks:
+    - name: load-test
+      url: http://flagger-loadtester.test/
+      timeout: 5s
+      metadata:
+        type: cmd
+        cmd: "hey -z 1m -q 10 -c 2 http://myapp-canary.default:80/"
+    
+  # Alerts
+  alerts:
+  - name: "Canary deployment notification"
+    severity: info
+    providerRef:
+      name: slack
+      namespace: flagger-system
+---
+# Service (will be managed by Flagger)
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+spec:
+  selector:
+    app: myapp
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+---
+# MetricTemplate for custom metrics (optional)
+apiVersion: flagger.app/v1beta1
+kind: MetricTemplate
+metadata:
+  name: error-rate
+spec:
+  provider:
+    type: prometheus
+    address: http://prometheus.monitoring.svc.cluster.local:9090
+  query: |
+    100 - sum(
+      rate(
+        http_requests_total{
+          kubernetes_pod_name=~"{{ target }}-[0-9a-zA-Z]+(-[0-9a-zA-Z]+)",
+          status!~"5.."
+        }[{{ interval }}]
+      )
+    ) 
+    / 
+    sum(
+      rate(
+        http_requests_total{
+          kubernetes_pod_name=~"{{ target }}-[0-9a-zA-Z]+(-[0-9a-zA-Z]+)"
+        }[{{ interval }}]
+      )
+    ) * 100
+---
+# How Flagger works:
+# 1. Detects new image version in deployment
+# 2. Creates canary deployment with new version
+# 3. Gradually shifts traffic: 0% -> 10% -> 20% -> 30% -> 40% -> 50%
+# 4. Validates metrics at each step
+# 5. If metrics pass: promotes canary to primary
+# 6. If metrics fail: rolls back automatically
+#
+# Monitor canary: kubectl describe canary myapp
+# Watch events: kubectl get events --watch --field-selector involvedObject.kind=Canary
+# Trigger rollout: update image in deployment
+#   kubectl set image deployment/myapp myapp=myapp:v2.0.0
